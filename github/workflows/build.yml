@@ -1,0 +1,1118 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install SDK
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Write project files
+        run: |
+          mkdir -p app/src/main/java/com/eni/poolassist
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle << 'ENI_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "PoolAssist"
+          include ':app'
+          ENI_EOF
+
+          cat > build.gradle << 'ENI_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.1' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          ENI_EOF
+
+          cat > gradle.properties << 'ENI_EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          kotlin.code.style=official
+          ENI_EOF
+
+          cat > app/build.gradle << 'ENI_EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.eni.poolassist'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.eni.poolassist"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                  release { minifyEnabled false }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.core:core-ktx:1.12.0'
+          }
+          ENI_EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'ENI_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <application
+                  android:label="@string/app_name"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".OverlayService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection"/>
+              </application>
+          </manifest>
+          ENI_EOF
+
+          cat > app/src/main/res/values/strings.xml << 'ENI_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">PoolAssist</string>
+          </resources>
+          ENI_EOF
+
+          cat > app/src/main/java/com/eni/poolassist/MainActivity.kt << 'ENI_EOF'
+          package com.eni.poolassist
+
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : AppCompatActivity() {
+
+              private val REQ_PROJ = 1001
+              private lateinit var status: TextView
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(20), dp(48), dp(20), dp(24))
+                      background = GradientDrawable(
+                          GradientDrawable.Orientation.TL_BR,
+                          intArrayOf(Color.parseColor("#141225"), Color.parseColor("#241E3A"))
+                      )
+                  }
+
+                  root.addView(TextView(this).apply {
+                      text = "PoolAssist"
+                      textSize = 30f
+                      setTextColor(Color.parseColor("#EDEAF7"))
+                      setTypeface(null, Typeface.BOLD)
+                  })
+
+                  root.addView(TextView(this).apply {
+                      text = "خطوط تصويب ذكية — كل كرة بلونها"
+                      textSize = 14f
+                      setTextColor(Color.parseColor("#9C93BD"))
+                      setPadding(0, dp(6), 0, dp(18))
+                  })
+
+                  status = TextView(this).apply {
+                      text = "جاهز — اتبع الخطوات"
+                      textSize = 13f
+                      setTextColor(Color.parseColor("#B9B0D8"))
+                      setPadding(0, 0, 0, dp(14))
+                  }
+                  root.addView(status)
+
+                  root.addView(card("① صلاحية الشاشة العائمة", "السماح بالرسم فوق التطبيقات") {
+                      startActivity(
+                          Intent(
+                              Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                              Uri.parse("package:$packageName")
+                          )
+                      )
+                  })
+
+                  root.addView(card("② تشغيل الخطوط", "التقاط الشاشة ثم فتح اللعبة") {
+                      val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                      startActivityForResult(mgr.createScreenCaptureIntent(), REQ_PROJ)
+                  })
+
+                  root.addView(card("③ افتح 8 Ball Pool", "ستظهر اللوحة العائمة والخطوط") {
+                      val i = packageManager.getLaunchIntentForPackage("com.miniclip.eightballpool")
+                      if (i != null) startActivity(i)
+                      else Toast.makeText(this, "اللعبة غير مثبتة", Toast.LENGTH_SHORT).show()
+                  })
+
+                  setContentView(root)
+              }
+
+              private fun card(title: String, sub: String, onClick: () -> Unit): LinearLayout {
+                  val card = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(18), dp(14), dp(18), dp(14))
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#2A2444"))
+                          cornerRadius = dp(18).toFloat()
+                      }
+                      isClickable = true
+                      isFocusable = true
+                      setOnClickListener { onClick() }
+                      layoutParams = LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      ).apply { bottomMargin = dp(10) }
+                  }
+                  card.addView(TextView(this).apply {
+                      text = title
+                      textSize = 16f
+                      setTextColor(Color.parseColor("#EDEAF7"))
+                      setTypeface(null, Typeface.BOLD)
+                  })
+                  card.addView(TextView(this).apply {
+                      text = sub
+                      textSize = 12f
+                      setTextColor(Color.parseColor("#9C93BD"))
+                      setPadding(0, dp(4), 0, 0)
+                  })
+                  return card
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  @Suppress("DEPRECATION")
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == REQ_PROJ) {
+                      if (resultCode == RESULT_OK && data != null) {
+                          val svc = Intent(this, OverlayService::class.java).apply {
+                              putExtra("resultCode", resultCode)
+                              putExtra("data", data)
+                          }
+                          ContextCompat.startForegroundService(this, svc)
+                          status.text = "الخطوط تعمل — اذهب للعبة"
+                          status.setTextColor(Color.parseColor("#7CFFB2"))
+                      } else {
+                          status.text = "تم إلغاء التقاط الشاشة"
+                          status.setTextColor(Color.parseColor("#FF8B8B"))
+                      }
+                  }
+              }
+          }
+          ENI_EOF
+
+          cat > app/src/main/java/com/eni/poolassist/Physics.kt << 'ENI_EOF'
+          package com.eni.poolassist
+
+          import kotlin.math.abs
+          import kotlin.math.atan2
+          import kotlin.math.cos
+          import kotlin.math.hypot
+          import kotlin.math.min
+          import kotlin.math.sin
+          import kotlin.math.sqrt
+
+          object Physics {
+
+              fun rayCircle(
+                  cx: Float, cy: Float,
+                  dx: Float, dy: Float,
+                  bx: Float, by: Float, r: Float
+              ): Float? {
+                  val ox = bx - cx
+                  val oy = by - cy
+                  val b = ox * dx + oy * dy
+                  val c = ox * ox + oy * oy - r * r
+                  val disc = b * b - c
+                  if (disc < 0f) return null
+                  val t = -b - sqrt(disc)
+                  return if (t > 0.001f) t else null
+              }
+
+              fun predictPath(
+                  cue: Ball,
+                  angle: Float,
+                  balls: List<Ball>,
+                  w: Float,
+                  h: Float,
+                  r: Float,
+                  maxBounce: Int = 1
+              ): List<Pair<Float, Float>> {
+
+                  var x = cue.x
+                  var y = cue.y
+                  var dx = cos(angle)
+                  var dy = sin(angle)
+                  val pts = mutableListOf(x to y)
+
+                  for (i in 0 until maxBounce) {
+                      var bestT = Float.MAX_VALUE
+                      var hitBall = false
+
+                      val tw = when {
+                          dx > 0f -> (w - r - x) / dx
+                          dx < 0f -> (r - x) / dx
+                          else -> Float.MAX_VALUE
+                      }
+                      val th = when {
+                          dy > 0f -> (h - r - y) / dy
+                          dy < 0f -> (r - y) / dy
+                          else -> Float.MAX_VALUE
+                      }
+
+                      for (b in balls) {
+                          if (b.isCue) continue
+                          val t = rayCircle(x, y, dx, dy, b.x, b.y, r * 2f)
+                          if (t != null && t < bestT) {
+                              bestT = t
+                              hitBall = true
+                          }
+                      }
+
+                      if (!hitBall) bestT = min(tw, th)
+                      if (bestT == Float.MAX_VALUE || bestT <= 0f) break
+
+                      x += dx * bestT
+                      y += dy * bestT
+                      pts.add(x to y)
+
+                      if (hitBall) return pts
+                      if (tw < th) dx = -dx else dy = -dy
+                  }
+                  return pts
+              }
+
+              fun ghostAngle(cue: Ball, target: Ball, px: Float, py: Float, r: Float): Float? {
+                  val ux = px - target.x
+                  val uy = py - target.y
+                  val len = hypot(ux, uy)
+                  if (len < 1f) return null
+                  val gx = target.x - ux / len * r * 2f
+                  val gy = target.y - uy / len * r * 2f
+                  if (abs(gx - cue.x) < 0.01f && abs(gy - cue.y) < 0.01f) return null
+                  return atan2(gy - cue.y, gx - cue.x)
+              }
+          }
+          ENI_EOF
+
+          cat > app/src/main/java/com/eni/poolassist/Detector.kt << 'ENI_EOF'
+          package com.eni.poolassist
+
+          import android.graphics.Bitmap
+          import android.graphics.Color
+          import kotlin.math.abs
+          import kotlin.math.hypot
+
+          data class Ball(val x: Float, val y: Float, val color: Int, val isCue: Boolean)
+
+          data class Segment(
+              val color: Int,
+              val points: List<Pair<Float, Float>>,
+              val dot: Pair<Float, Float>? = null
+          )
+
+          object Detector {
+
+              private var buf: IntArray? = null
+              private const val TOP_SKIP = 0.10f
+              private const val BOTTOM_SKIP = 0.86f
+
+              fun detect(bmp: Bitmap, scaleFactor: Float): List<Ball> {
+                  val w = bmp.width
+                  val h = bmp.height
+                  val need = w * h
+                  if (need <= 0) return emptyList()
+
+                  val px = if (buf == null || buf!!.size != need) {
+                      IntArray(need).also { buf = it }
+                  } else {
+                      buf!!
+                  }
+                  bmp.getPixels(px, 0, w, 0, 0, w, h)
+
+                  val bg = dominant(px, w, h)
+                  val out = mutableListOf<Ball>()
+                  val step = 6
+                  val r = 14
+
+                  val yStart = (h * TOP_SKIP).toInt().coerceAtLeast(step)
+                  val yEnd = (h * BOTTOM_SKIP).toInt().coerceAtMost(h - step)
+
+                  var y = yStart
+                  while (y < yEnd) {
+                      var x = step
+                      while (x < w - step) {
+                          val c = px[y * w + x]
+
+                          if (dist2(c, bg) < 45 * 45) { x += step; continue }
+
+                          val rr = (c shr 16) and 0xFF
+                          val gg = (c shr 8) and 0xFF
+                          val bb = c and 0xFF
+                          val mx = maxOf(rr, gg, bb)
+                          val mn = minOf(rr, gg, bb)
+                          val sat = mx - mn
+
+                          val cls: Int? = when {
+                              mx > 205 && sat < 26 -> Color.WHITE
+                              mx < 48 && sat < 26 -> Color.parseColor("#3A3A3A")
+                              mx > 105 && sat > 85 -> classify(rr, gg, bb)
+                              else -> null
+                          }
+
+                          if (cls != null && isBlob(px, w, h, x, y, c, r)) {
+                              out.add(
+                                  Ball(
+                                      x * scaleFactor,
+                                      y * scaleFactor,
+                                      cls,
+                                      cls == Color.WHITE
+                                  )
+                              )
+                          }
+                          x += step
+                      }
+                      y += step
+                  }
+
+                  val merged = mutableListOf<Ball>()
+                  for (b in out) {
+                      val near = merged.any {
+                          abs(it.x - b.x) < 60f &&
+                              abs(it.y - b.y) < 60f &&
+                              it.isCue == b.isCue &&
+                              dist2(it.color, b.color) < 90 * 90
+                      }
+                      if (!near) merged.add(b)
+                  }
+                  return merged
+              }
+
+              fun buildSegments(
+                  balls: List<Ball>,
+                  screenW: Float,
+                  screenH: Float,
+                  ballR: Float = 16f
+              ): List<Segment> {
+                  val cue = balls.firstOrNull { it.isCue } ?: return emptyList()
+                  val targets = balls.filter { !it.isCue }
+                  if (targets.isEmpty()) return emptyList()
+
+                  val pockets = listOf(
+                      30f to 30f,
+                      (screenW - 30f) to 30f,
+                      30f to (screenH - 30f),
+                      (screenW - 30f) to (screenH - 30f)
+                  )
+
+                  val segs = mutableListOf<Segment>()
+
+                  for (target in targets) {
+                      var bestPocket: Pair<Float, Float>? = null
+                      var bestD = Float.MAX_VALUE
+                      for (p in pockets) {
+                          val d = hypot(p.first - target.x, p.second - target.y)
+                          if (d < bestD) {
+                              bestD = d
+                              bestPocket = p
+                          }
+                      }
+                      val pocket = bestPocket ?: continue
+                      val ang = Physics.ghostAngle(cue, target, pocket.first, pocket.second, ballR)
+                          ?: continue
+
+                      val path = Physics.predictPath(
+                          cue, ang, balls, screenW, screenH, ballR, maxBounce = 1
+                      )
+                      if (path.size < 2) continue
+
+                      segs.add(Segment(target.color, path, null))
+                      segs.add(
+                          Segment(
+                              target.color,
+                              listOf(target.x to target.y, pocket.first to pocket.second),
+                              pocket
+                          )
+                      )
+                  }
+                  return segs
+              }
+
+              private fun dominant(px: IntArray, w: Int, h: Int): Int {
+                  val map = HashMap<Int, Int>()
+                  var y = 0
+                  while (y < h) {
+                      var x = 0
+                      while (x < w) {
+                          val c = px[y * w + x]
+                          val q = (((c shr 19) and 0x1F) shl 10) or
+                                  (((c shr 11) and 0x1F) shl 5) or
+                                  ((c shr 3) and 0x1F)
+                          map[q] = (map[q] ?: 0) + 1
+                          x += 8
+                      }
+                      y += 8
+                  }
+                  val best = map.maxByOrNull { it.value }?.key ?: 0
+                  val r = ((best shr 10) and 0x1F) shl 3
+                  val g = ((best shr 5) and 0x1F) shl 3
+                  val b = (best and 0x1F) shl 3
+                  return Color.rgb(r, g, b)
+              }
+
+              private fun isBlob(
+                  px: IntArray, w: Int, h: Int,
+                  x: Int, y: Int, c: Int, r: Int
+              ): Boolean {
+                  var count = 0
+                  val xs = intArrayOf(x - r, x + r, x, x)
+                  val ys = intArrayOf(y, y, y - r, y + r)
+                  for (i in 0 until 4) {
+                      val nx = xs[i]
+                      val ny = ys[i]
+                      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+                      if (dist2(px[ny * w + nx], c) < 60 * 60) count++
+                  }
+                  return count >= 3
+              }
+
+              private fun classify(r: Int, g: Int, b: Int): Int {
+                  val palette = intArrayOf(
+                      Color.RED,
+                      Color.YELLOW,
+                      Color.BLUE,
+                      Color.rgb(255, 140, 0),
+                      Color.rgb(0, 190, 0),
+                      Color.rgb(128, 0, 128),
+                      Color.rgb(128, 0, 0),
+                      Color.rgb(0, 190, 190)
+                  )
+                  var best = Color.WHITE
+                  var bestD = Int.MAX_VALUE
+                  for (p in palette) {
+                      val pr = (p shr 16) and 0xFF
+                      val pg = (p shr 8) and 0xFF
+                      val pb = p and 0xFF
+                      val d = (r - pr) * (r - pr) + (g - pg) * (g - pg) + (b - pb) * (b - pb)
+                      if (d < bestD) {
+                          bestD = d
+                          best = p
+                      }
+                  }
+                  return best
+              }
+
+              private fun dist2(c1: Int, c2: Int): Int {
+                  val r1 = (c1 shr 16) and 0xFF
+                  val g1 = (c1 shr 8) and 0xFF
+                  val b1 = c1 and 0xFF
+                  val r2 = (c2 shr 16) and 0xFF
+                  val g2 = (c2 shr 8) and 0xFF
+                  val b2 = c2 and 0xFF
+                  return (r1 - r2) * (r1 - r2) + (g1 - g2) * (g1 - g2) + (b1 - b2) * (b1 - b2)
+              }
+          }
+          ENI_EOF
+
+          cat > app/src/main/java/com/eni/poolassist/OverlayView.kt << 'ENI_EOF'
+          package com.eni.poolassist
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.view.View
+
+          class OverlayView(ctx: Context) : View(ctx) {
+
+              private var segments: List<Segment> = emptyList()
+              private var lineWidth: Float = 5f
+
+              private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  style = Paint.Style.STROKE
+                  strokeCap = Paint.Cap.ROUND
+                  strokeJoin = Paint.Join.ROUND
+              }
+              private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  style = Paint.Style.FILL
+              }
+
+              fun updateSegments(list: List<Segment>, width: Float) {
+                  segments = list
+                  lineWidth = width
+                  postInvalidate()
+              }
+
+              fun clear() {
+                  segments = emptyList()
+                  postInvalidate()
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  super.onDraw(canvas)
+                  if (segments.isEmpty()) return
+
+                  linePaint.strokeWidth = lineWidth
+
+                  for (seg in segments) {
+                      linePaint.color = seg.color
+                      val pts = seg.points
+                      for (i in 0 until pts.size - 1) {
+                          canvas.drawLine(
+                              pts[i].first, pts[i].second,
+                              pts[i + 1].first, pts[i + 1].second,
+                              linePaint
+                          )
+                      }
+                      seg.dot?.let {
+                          dotPaint.color = seg.color
+                          canvas.drawCircle(it.first, it.second, lineWidth + 3f, dotPaint)
+                      }
+                  }
+              }
+          }
+          ENI_EOF
+
+          cat > app/src/main/java/com/eni/poolassist/ControlPanel.kt << 'ENI_EOF'
+          package com.eni.poolassist
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.Switch
+          import android.widget.TextView
+
+          class ControlPanel(
+              private val ctx: Context,
+              private val win: WindowManager,
+              private val onToggle: (Boolean) -> Unit,
+              private val onScale: (Float) -> Unit,
+              private val onClose: () -> Unit
+          ) {
+
+              private var scale = 1f
+
+              private val params = WindowManager.LayoutParams(
+                  WindowManager.LayoutParams.WRAP_CONTENT,
+                  WindowManager.LayoutParams.WRAP_CONTENT,
+                  WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                  android.graphics.PixelFormat.TRANSLUCENT
+              ).apply {
+                  gravity = Gravity.TOP or Gravity.START
+                  x = dp(14)
+                  y = dp(110)
+              }
+
+              private val container = FrameLayout(ctx)
+              private val expandedView: View = buildExpanded()
+              private val collapsedView: View = buildCollapsed()
+
+              init {
+                  container.addView(collapsedView)
+              }
+
+              fun show() {
+                  if (container.parent == null) {
+                      try {
+                          win.addView(container, params)
+                      } catch (_: Exception) {
+                          onClose()
+                      }
+                  }
+              }
+
+              fun hide() {
+                  if (container.parent != null) {
+                      try { win.removeView(container) } catch (_: Exception) {}
+                  }
+              }
+
+              private fun dp(v: Int): Int = (v * ctx.resources.displayMetrics.density).toInt()
+
+              private fun rounded(color: Int, radius: Float): GradientDrawable =
+                  GradientDrawable().apply {
+                      setColor(color)
+                      cornerRadius = radius
+                  }
+
+              private fun iconButton(label: String, onClick: () -> Unit): TextView {
+                  val tv = TextView(ctx).apply {
+                      text = label
+                      textSize = 15f
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.parseColor("#EDEAF7"))
+                      background = rounded(Color.parseColor("#3A3360"), dp(12).toFloat())
+                      isClickable = true
+                      setOnClickListener { onClick() }
+                  }
+                  tv.layoutParams = LinearLayout.LayoutParams(dp(34), dp(34)).apply {
+                      marginStart = dp(6)
+                  }
+                  return tv
+              }
+
+              private fun buildExpanded(): View {
+                  val card = LinearLayout(ctx).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(12), dp(16), dp(14))
+                      background = rounded(Color.parseColor("#EE1B1730"), dp(20).toFloat())
+                  }
+
+                  val header = LinearLayout(ctx).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+
+                  val handle = TextView(ctx).apply {
+                      text = "≡"
+                      textSize = 18f
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.parseColor("#B9B0D8"))
+                      layoutParams = LinearLayout.LayoutParams(dp(26), dp(30))
+                  }
+                  enableDrag(handle)
+                  header.addView(handle)
+
+                  header.addView(TextView(ctx).apply {
+                      text = "PoolAssist"
+                      textSize = 14f
+                      setTextColor(Color.parseColor("#EDEAF7"))
+                      setTypeface(null, Typeface.BOLD)
+                      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  })
+
+                  header.addView(iconButton("—") { setCollapsed(true) })
+                  header.addView(iconButton("X") { onClose() })
+
+                  card.addView(header)
+
+                  val toggleRow = LinearLayout(ctx).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(0, dp(8), 0, 0)
+                  }
+                  toggleRow.addView(TextView(ctx).apply {
+                      text = "إظهار الخطوط"
+                      textSize = 12f
+                      setTextColor(Color.parseColor("#B9B0D8"))
+                      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  })
+                  toggleRow.addView(Switch(ctx).apply {
+                      isChecked = true
+                      setOnCheckedChangeListener { _, b -> onToggle(b) }
+                  })
+                  card.addView(toggleRow)
+
+                  val scaleRow = LinearLayout(ctx).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(0, dp(6), 0, 0)
+                  }
+                  scaleRow.addView(TextView(ctx).apply {
+                      text = "سماكة الخط"
+                      textSize = 12f
+                      setTextColor(Color.parseColor("#B9B0D8"))
+                      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  })
+                  scaleRow.addView(iconButton("-") { changeScale(-0.25f) })
+                  scaleRow.addView(iconButton("+") { changeScale(0.25f) })
+                  card.addView(scaleRow)
+
+                  return card
+              }
+
+              private fun buildCollapsed(): View {
+                  val tv = TextView(ctx).apply {
+                      text = "P"
+                      textSize = 17f
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.parseColor("#EDEAF7"))
+                      background = GradientDrawable().apply {
+                          shape = GradientDrawable.OVAL
+                          setColor(Color.parseColor("#7C5CFF"))
+                      }
+                  }
+                  val size = dp(52)
+                  tv.layoutParams = FrameLayout.LayoutParams(size, size)
+                  enableDragAndClick(tv) { setCollapsed(false) }
+                  return tv
+              }
+
+              private fun setCollapsed(c: Boolean) {
+                  container.removeAllViews()
+                  if (c) container.addView(collapsedView) else container.addView(expandedView)
+                  try { win.updateViewLayout(container, params) } catch (_: Exception) {}
+              }
+
+              private fun changeScale(delta: Float) {
+                  scale = (scale + delta).coerceIn(0.5f, 2.5f)
+                  onScale(scale)
+              }
+
+              private fun enableDrag(v: View) {
+                  var dx0 = 0f
+                  var dy0 = 0f
+                  var sx = 0
+                  var sy = 0
+                  v.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              dx0 = e.rawX
+                              dy0 = e.rawY
+                              sx = params.x
+                              sy = params.y
+                              true
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              params.x = sx + (e.rawX - dx0).toInt()
+                              params.y = sy + (e.rawY - dy0).toInt()
+                              try { win.updateViewLayout(container, params) } catch (_: Exception) {}
+                              true
+                          }
+                          else -> true
+                      }
+                  }
+              }
+
+              private fun enableDragAndClick(v: View, onClick: () -> Unit) {
+                  var dx0 = 0f
+                  var dy0 = 0f
+                  var sx = 0
+                  var sy = 0
+                  var moved = false
+                  v.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              dx0 = e.rawX
+                              dy0 = e.rawY
+                              sx = params.x
+                              sy = params.y
+                              moved = false
+                              true
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = e.rawX - dx0
+                              val dy = e.rawY - dy0
+                              if (kotlin.math.abs(dx) > dp(8) || kotlin.math.abs(dy) > dp(8)) moved = true
+                              params.x = sx + dx.toInt()
+                              params.y = sy + dy.toInt()
+                              try { win.updateViewLayout(container, params) } catch (_: Exception) {}
+                              true
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              if (!moved) onClick()
+                              true
+                          }
+                          else -> false
+                      }
+                  }
+              }
+          }
+          ENI_EOF
+
+          cat > app/src/main/java/com/eni/poolassist/OverlayService.kt << 'ENI_EOF'
+          package com.eni.poolassist
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.IBinder
+          import android.os.Looper
+          import android.view.WindowManager
+
+          class OverlayService : Service() {
+
+              private lateinit var win: WindowManager
+              private lateinit var overlay: OverlayView
+              private lateinit var overlayParams: WindowManager.LayoutParams
+              private var control: ControlPanel? = null
+
+              private var projection: MediaProjection? = null
+              private var reader: ImageReader? = null
+              private var virtual: VirtualDisplay? = null
+
+              private val main = Handler(Looper.getMainLooper())
+              private val bgThread = HandlerThread("eni-capture").apply { start() }
+              private val bg = Handler(bgThread.looper)
+
+              private var running = true
+              private var showLines = true
+              private var lineScale = 1f
+              private var scaleFactor = 2f
+
+              private var paddedBmp: Bitmap? = null
+              private var croppedBmp: Bitmap? = null
+
+              private val loop = object : Runnable {
+                  override fun run() {
+                      if (!running) return
+                      try { grab() } catch (_: Exception) {}
+                      bg.postDelayed(this, 220)
+                  }
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  win = getSystemService(WINDOW_SERVICE) as WindowManager
+
+                  overlay = OverlayView(this)
+                  overlayParams = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  try {
+                      win.addView(overlay, overlayParams)
+                  } catch (_: Exception) {}
+
+                  control = ControlPanel(
+                      this,
+                      win,
+                      onToggle = { on ->
+                          showLines = on
+                          if (!on) overlay.clear()
+                      },
+                      onScale = { s -> lineScale = s },
+                      onClose = { stopSelf() }
+                  ).also { it.show() }
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val notif = buildNotif()
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(7, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  } else {
+                      startForeground(7, notif)
+                  }
+
+                  val code = intent?.getIntExtra("resultCode", 0) ?: 0
+                  @Suppress("DEPRECATION")
+                  val data: Intent? = intent?.getParcelableExtra("data")
+                  if (code == 0 || data == null) return START_STICKY
+
+                  val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  projection = mgr.getMediaProjection(code, data)
+
+                  projection?.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() {
+                          main.post { stopSelf() }
+                      }
+                  }, bg)
+
+                  val (sw, sh) = screenSize()
+                  val capW = (sw / 2).coerceAtLeast(2)
+                  val capH = (sh / 2).coerceAtLeast(2)
+                  scaleFactor = sw.toFloat() / capW.toFloat()
+
+                  reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
+                  val density = resources.displayMetrics.densityDpi
+
+                  virtual = projection?.createVirtualDisplay(
+                      "eni",
+                      capW, capH, density,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                      reader!!.surface, null, bg
+                  )
+
+                  running = true
+                  bg.removeCallbacks(loop)
+                  bg.postDelayed(loop, 600)
+                  return START_STICKY
+              }
+
+              private fun grab() {
+                  val r = reader ?: return
+                  val img = r.acquireLatestImage() ?: return
+                  try {
+                      val plane = img.planes[0]
+                      val rowStride = plane.rowStride
+                      val pixelStride = plane.pixelStride
+                      val padding = rowStride - pixelStride * img.width
+                      val paddedW = img.width + padding / pixelStride
+
+                      val buf = plane.buffer
+                      buf.rewind()
+
+                      var padded = paddedBmp
+                      if (padded == null || padded.width != paddedW || padded.height != img.height) {
+                          padded?.recycle()
+                          padded = Bitmap.createBitmap(paddedW, img.height, Bitmap.Config.ARGB_8888)
+                          paddedBmp = padded
+                      }
+                      padded.copyPixelsFromBuffer(buf)
+
+                      var cropped = croppedBmp
+                      if (cropped == null || cropped.width != img.width || cropped.height != img.height) {
+                          cropped?.recycle()
+                          cropped = Bitmap.createBitmap(img.width, img.height, Bitmap.Config.ARGB_8888)
+                          croppedBmp = cropped
+                      }
+
+                      val canvas = Canvas(cropped)
+                      canvas.drawBitmap(padded, 0f, 0f, null)
+
+                      if (!showLines) {
+                          main.post { overlay.clear() }
+                          return
+                      }
+
+                      val (sw, sh) = screenSize()
+                      val balls = Detector.detect(cropped, scaleFactor)
+                      val segs = Detector.buildSegments(
+                          balls,
+                          sw.toFloat(),
+                          sh.toFloat(),
+                          ballR = 16f
+                      )
+
+                      val width = 4f + lineScale * 3f
+                      main.post { overlay.updateSegments(segs, width) }
+                  } catch (_: Exception) {
+                  } finally {
+                      img.close()
+                  }
+              }
+
+              private fun screenSize(): Pair<Int, Int> {
+                  return if (Build.VERSION.SDK_INT >= 30) {
+                      val b = win.maximumWindowMetrics.bounds
+                      b.width() to b.height()
+                  } else {
+                      @Suppress("DEPRECATION")
+                      resources.displayMetrics.widthPixels to resources.displayMetrics.heightPixels
+                  }
+              }
+
+              private fun buildNotif(): Notification {
+                  val ch = NotificationChannel(
+                      "eni", "PoolAssist", NotificationManager.IMPORTANCE_LOW
+                  )
+                  (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                      .createNotificationChannel(ch)
+
+                  return Notification.Builder(this, "eni")
+                      .setContentTitle("PoolAssist يعمل")
+                      .setSmallIcon(android.R.drawable.ic_menu_compass)
+                      .setOngoing(true)
+                      .build()
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  bg.removeCallbacks(loop)
+                  control?.hide()
+                  control = null
+
+                  virtual?.release()
+                  virtual = null
+                  projection?.stop()
+                  projection = null
+                  reader?.close()
+                  reader = null
+
+                  paddedBmp?.recycle()
+                  paddedBmp = null
+                  croppedBmp?.recycle()
+                  croppedBmp = null
+
+                  if (::overlay.isInitialized) {
+                      try { win.removeView(overlay) } catch (_: Exception) {}
+                  }
+                  bgThread.quitSafely()
+                  super.onDestroy()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+          }
+          ENI_EOF
+
+          echo "كل الملفات كتبت بنجاح"
+
+      - name: Build APK
+        run: |
+          gradle wrapper --gradle-version 8.7
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PoolAssist-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
